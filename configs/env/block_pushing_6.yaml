@@ -4,7 +4,7 @@ action_dim: 2
 action_min: null
 action_max: null
 
-load_dir: "/root/bet/exp_local/2024.12.04/120446_blockpush_train-normal-24"
+load_dir: /root/bet/exp_local/2024.12.10/073855_blockpush_train
 
 workspace:
   _target_: workspaces.block_push.BlockPushWorkspace
