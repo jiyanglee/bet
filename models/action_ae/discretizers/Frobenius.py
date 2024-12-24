@@ -4,16 +4,18 @@ import tqdm
 from typing import Optional, Tuple, Union
 from models.action_ae.discretizers.base import AbstractDiscretizer
 
-class GrassmannianDiscretizer(AbstractDiscretizer):
+
+class ProjectionBasedDiscretizer(AbstractDiscretizer):
     """
-    Optimized Discretizer using Grassmannian Geodesic metrics with GPU and vectorized operations.
+    Discretizer for action representations using Grassmannian Projection Distance.
+    Optimized for GPU and vectorized operations.
     """
 
     def __init__(
         self,
         action_dim: int,
         num_bins: int = 100,
-        device: Union[str, torch.device] = "cuda",  # Default to GPU
+        device: Union[str, torch.device] = "cuda",
         predict_offsets: bool = False,
         k_neighbors: int = 10,
     ):
@@ -30,62 +32,48 @@ class GrassmannianDiscretizer(AbstractDiscretizer):
         ), f"Input action dimension {self.action_dim} does not match fitted model {input_actions.shape[-1]}"
 
         flattened_actions = input_actions.view(-1, self.action_dim).to(self.device)
-        cluster_centers = self._manifold_kmeans(flattened_actions, self.n_bins)
+        cluster_centers = self._projection_kmeans(flattened_actions, self.n_bins)
         self.bin_centers = cluster_centers.to(self.device)
 
     @property
     def suggested_actions(self) -> torch.Tensor:
         return self.bin_centers
 
-    def _geodesic_metric(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def _projection_metric(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
-        Compute pairwise Geodesic distances on the Grassmannian.
+        Compute pairwise Grassmannian projection distances using Frobenius norm.
+        This metric captures differences between projection matrices of input points.
         """
-        # Compute projection matrices
-        proj_x = torch.einsum('bi,bj->bij', x, x)  # Projection matrix for x
-        proj_y = torch.einsum('bi,bj->bij', y, y)  # Projection matrix for y
+        proj_x = torch.einsum("bi,bj->bij", x, x)
+        proj_y = torch.einsum("bi,bj->bij", y, y)
+        distance = torch.norm(
+            proj_x[:, None, :, :] - proj_y[None, :, :, :], dim=(-2, -1), p="fro"
+        )
+        return distance
 
-        # Ensure proj_x and proj_y have compatible batch sizes for pairwise computation
-        proj_x = proj_x.unsqueeze(1)  # Shape: (batch_size_x, 1, dim, dim)
-        proj_y = proj_y.unsqueeze(0)  # Shape: (1, batch_size_y, dim, dim)
-
-        # Compute the principal angles using singular value decomposition (SVD)
-        svd_values = torch.linalg.svdvals(torch.matmul(proj_x, proj_y))  # Pairwise computation
-
-        # Clamp values to avoid numerical issues
-        svd_values = torch.clamp(svd_values, -1.0, 1.0)
-
-        # Compute the geodesic distance
-        principal_angles = torch.acos(svd_values)
-        geodesic_distance = torch.sqrt(torch.sum(principal_angles ** 2, dim=-1))
-
-        return geodesic_distance
-
-    def _manifold_kmeans(self, x: torch.Tensor, ncluster: int, niter: int = 50) -> torch.Tensor:
+    def _projection_kmeans(
+        self, x: torch.Tensor, ncluster: int, niter: int = 50
+    ) -> torch.Tensor:
         """
-        Perform optimized k-means clustering using Grassmannian geodesic distance.
+        Perform k-means clustering using Grassmannian projection distances.
+        Cluster centers are updated as normalized means on the Grassmannian manifold.
         """
         N, D = x.size()
-        c = x[torch.randperm(N)[:ncluster]]  # Initialize clusters randomly
-        c = c.to(self.device)
+        c = x[torch.randperm(N)[:ncluster]].to(self.device)
 
         pbar = tqdm.trange(niter)
-        pbar.set_description("Grassmannian Geodesic K-means clustering")
+        pbar.set_description("Grassmannian Projection K-means clustering")
         for i in pbar:
-            # Compute distances in a vectorized manner
-            distances = self._geodesic_metric(x, c)
-
-            # Assign points to the closest cluster center
+            distances = self._projection_metric(x, c)
             a = distances.argmin(dim=1)
 
-            # Update cluster centers to be the Grassmannian mean of assigned points
             new_centers = []
             for k in range(ncluster):
                 assigned_points = x[a == k]
                 if len(assigned_points) > 0:
                     mean = assigned_points.mean(dim=0)
                     norm_mean = torch.norm(mean, p=2, dim=-1, keepdim=True)
-                    new_centers.append(mean / norm_mean)  # Normalize to manifold
+                    new_centers.append(mean / norm_mean)
                 else:
                     new_centers.append(c[k])
             c = torch.stack(new_centers)
@@ -99,7 +87,7 @@ class GrassmannianDiscretizer(AbstractDiscretizer):
         ), "Input action dimension does not match fitted model"
 
         flattened_actions = input_action.view(-1, self.action_dim).to(self.device)
-        distances = self._geodesic_metric(flattened_actions, self.bin_centers)
+        distances = self._projection_metric(flattened_actions, self.bin_centers)
         closest_cluster_center = distances.argmin(dim=1)
         discretized_action = closest_cluster_center.view(input_action.shape[:-1] + (1,))
 
